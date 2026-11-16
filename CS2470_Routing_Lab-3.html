@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CS 2470: Optional Miniproject 2 - Routing</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f3f9;color:#252039;font:16px system-ui,sans-serif}header{background:#29204c;color:white;padding:36px max(5vw,20px)}header p{color:#e2d9ff;margin:0}h1{font-size:clamp(2rem,5vw,3.4rem);margin:6px 0}main{max-width:1200px;margin:auto;padding:24px}section{background:white;border:1px solid #ded9ed;border-radius:14px;padding:22px;margin-bottom:18px}h2{margin:0 0 14px;font-size:1.3rem}p{line-height:1.5}.row{display:flex;flex-wrap:wrap;align-items:end;gap:12px}label{display:grid;gap:5px;font-weight:600}input,select,button{font:inherit;padding:8px 11px;border:1px solid #bcb3d0;border-radius:7px;background:white;color:inherit}input[type=number]{width:92px}button{cursor:pointer;font-weight:600}button.primary{background:#54358d;color:white;border-color:#54358d}button:disabled{opacity:.5;cursor:default}.links{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}.links button{font-size:.88rem}svg{width:100%;height:auto;max-height:350px;background:#f8f6fd;border-radius:10px;margin:14px 0}table{width:100%;border-collapse:collapse;text-align:left}td,th{padding:8px;border-bottom:1px solid #e5dfef}th{background:#f4effb}.scroll{overflow:auto}pre{background:#241d38;color:#e8e0ff;padding:15px;border-radius:8px;overflow:auto}code{background:#f3edf9;padding:2px 4px}li{margin:8px 0}small{color:#514867}#notice{min-height:1.5em;color:#684513}
+.routing-tables{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:14px}.routing-tables caption{text-align:left;font-weight:700;padding:9px 8px;background:#ece5f8}.routing-tables table{font-size:.87rem}</style>
+<header><p>CS 2470 · NETWORKING</p><h2>Optional Miniproject 2 - Routing</h2><p>Build a network, trace a packet, and see what changes when a link fails.</p></header>
+<main>
+<section><h2>1. Build the topology and choose a routing algorithm</h2>
+<form id="build" class="row"><label>Hosts<input id="hosts" type="number" min="2" max="8" value="2" required></label><label>Routers<input id="routers" type="number" min="1" max="10" value="4" required></label><button class="primary">Generate topology</button></form>
+<div class="row"><label>Routing algorithm<select id="algorithm"><option value="ls">Link state (Dijkstra)</option><option value="dv">Distance vector (Bellman–Ford)</option></select></label></div>
+<div id="diagram"></div>
+<form id="link" class="row"><label>From<select id="from"></select></label><label>To<select id="to"></select></label><label>Link cost<input id="cost" type="number" min="1" max="99" value="1" required></label><button>Add or update link</button></form>
+<p><small>Select a link below to remove it. Hosts can attach to multiple routers. Only routers forward packets between nodes.</small></p><div class="links" id="links"></div><p id="notice" role="status"></p>
+</section>
+<section><h2>2. Step through routing tables</h2>
+<p>Choose a routing algorithm in Step 1. Each table shows one node’s cost and next hop to every destination.</p>
+<div class="row"><button id="startSteps">Start routing steps from scratch</button><button id="nextStep" class="primary" disabled>Next</button></div>
+<p id="stepStatus" role="status">Start to see the initial tables.</p>
+<div id="stepTables"></div>
+</section>
+<section><h2>3. Run traceroute</h2>
+<p>Finish the routing calculation in Step 2 to enable traceroute.</p>
+<div class="row"><label>Source host<select id="source"></select></label><label>Destination host<select id="destination"></select></label><label>Maximum hops<input id="maxHops" type="number" min="1" max="255" value="5" required></label><label>Probe timeout (seconds)<input id="timeout" type="number" min="0.1" max="60" step="0.1" value="1" required></label><button id="run" class="primary" disabled>Run traceroute</button><button id="download" disabled>Download Wireshark capture</button></div>
+<div id="results" aria-live="polite">Run traceroute to see the hops and compare both algorithms.</div>
+</section>
+
+</main>
+<script>
+'use strict';
+let steps = null, displayedTables = null, completedStep = null;
+const by = id => document.getElementById(id);
+const ids = (prefix,n) => Array.from({length:n},(_,i)=>prefix+(i+1));
+let hosts=[], routers=[], links=[], selectedPath=[], capture=null;
+const all = () => [...hosts,...routers];
+const ip = node => '10.247.'+(node[0]==='H'?'1.':'2.')+node.slice(1);
+const same = (e,a,b) => (e.a===a&&e.b===b)||(e.a===b&&e.b===a);
+const host = n => n[0]==='H';
+const neighbors = n => links.flatMap(e=>e.a===n?[[e.b,e.cost]]:e.b===n?[[e.a,e.cost]]:[]);
+function options(el, nodes, preferred){
+  el.innerHTML=nodes.map(n=>'<option>'+n+'</option>').join('');
+  if(nodes.includes(preferred))el.value=preferred;
+}
+function draw(){
+  const groups=[hosts,routers], pos={};
+  groups.forEach((nodes,row)=>nodes.forEach((n,i)=>pos[n]=[60+(i+.5)*880/nodes.length, row===0?57:205]));
+  const wires=links.map(({a,b,cost})=>{
+    const [x,y]=pos[a], [u,v]=pos[b];
+    const active=selectedPath.some((n,i)=>i>0&&same({a,b},n,selectedPath[i-1]));
+    const curve=y===v;
+    const rise=curve?Math.min(105,33+Math.abs(x-u)*.12):0;
+    return '<path d="M'+x+' '+y+' Q'+(x+u)/2+' '+((y+v)/2-rise)+' '+u+' '+v+'" fill="none" stroke="'+(active?'#13826f':'#8c7cae')+'" stroke-width="'+(active?5:2)+'"/><text x="'+(x+u)/2+'" y="'+((y+v)/2-rise/2-5)+'" text-anchor="middle" fill="#39265c" stroke="#f8f6fd" stroke-width="4" paint-order="stroke">'+cost+'</text>';
+  }).join('');
+  const nodes=all().map(n=>{
+    const [x,y]=pos[n];
+    return '<rect x="'+(x-27)+'" y="'+(y-18)+'" width="54" height="36" rx="'+(host(n)?6:17)+'" fill="'+(host(n)?'#54358d':'#14695c')+'"/><text x="'+x+'" y="'+(y+5)+'" text-anchor="middle" fill="white" font-weight="700">'+n+'</text><text x="'+x+'" y="'+(y+34)+'" text-anchor="middle" fill="#433654" font-size="12">'+ip(n)+'</text>';
+  }).join('');
+  by('diagram').innerHTML='<svg viewBox="0 0 1000 260" role="img" aria-label="Network topology. H denotes hosts and R denotes routers. Link costs are listed below.">'+wires+nodes+'</svg>';
+  by('links').replaceChildren(...links.map(({a,b,cost},i)=>{
+    const button=document.createElement('button');
+    button.textContent=a+' – '+b+' · '+cost+' ×';
+    button.setAttribute('aria-label','Remove link '+a+' to '+b+' with cost '+cost);
+    button.onclick=()=>{links.splice(i,1);topologyChanged();};
+    return button;
+  }));
+}
+function clearTrace(){
+  selectedPath=[];capture=null;by('download').disabled=true;
+  by('results').textContent='Run traceroute to see the hops and compare both algorithms.';
+  by('notice').textContent='';draw();
+}
+function invalidate(){
+  steps=null;displayedTables=null;completedStep=null;by('run').disabled=true;by('nextStep').disabled=true;
+  by('stepStatus').textContent='Start to see the initial tables.';
+  by('stepTables').replaceChildren();
+  clearTrace();
+}
+function topologyChanged(){
+  clearTrace();
+  if(!displayedTables)return;
+  if(by('algorithm').value==='dv'){
+    steps=distanceVectorSteps(displayedTables);
+  }else{
+    steps=linkStateSteps();
+    steps.next(); // Show the first calculation using the updated topology.
+  }
+  showStep('Topology updated. ');
+}
+function build(){
+  hosts=ids('H',Number(by('hosts').value));routers=ids('R',Number(by('routers').value));links=[];
+  hosts.forEach((a,i)=>links.push({a,b:routers[i===1?routers.length-1:i%routers.length],cost:1}));
+  routers.slice(1).forEach((b,i)=>links.push({a:routers[i],b,cost:2}));
+  if(routers.length>2)links.push({a:routers[0],b:routers.at(-1),cost:1});
+  if(routers.length>=4)links.push({a:'R2',b:routers.at(-1),cost:2});
+  options(by('from'),all(),'R1');options(by('to'),all(),routers[1]||'H1');
+  options(by('source'),hosts,'H1');options(by('destination'),hosts,'H2');invalidate();
+}
+by('build').onsubmit=e=>{e.preventDefault();build();};
+by('link').onsubmit=e=>{
+  e.preventDefault();
+  const a=by('from').value,b=by('to').value,cost=Number(by('cost').value);
+  if(a===b||host(a)&&host(b)){by('notice').textContent='Choose distinct endpoints and include at least one router.';return;}
+  const edge=links.find(edge=>same(edge,a,b));
+  if(edge)edge.cost=cost;
+  else links.push({a,b,cost});
+  topologyChanged();
+  by('notice').textContent=a+' to '+b+' saved with cost '+cost+'.';
+};
+by('algorithm').onchange=invalidate;
+for(const name of ['source','destination','maxHops','timeout'])by(name).onchange=clearTrace;
+
+function initialTables(nodes){
+  return Object.fromEntries(nodes.map(source=>[source,Object.fromEntries(
+    nodes.map(dest=>[dest,{cost:source===dest?0:Infinity,next:null}])
+  )]));
+}
+function* linkStateSteps(){
+  const nodes=all(), tables=initialTables(nodes);
+  const pending=Object.fromEntries(nodes.map(n=>[n,new Set(nodes)]));
+  let step=0;
+  yield {tables,step,pending,detail:'Initialization. Each node knows its own cost of zero.'};
+  while(true){
+    const settled=[];
+    for(const source of nodes){
+      const row=tables[source], remaining=pending[source];
+      const closest=[...remaining].reduce((best,n)=>
+        best===null||row[n].cost<row[best].cost?n:best,null);
+      if(closest===null||!Number.isFinite(row[closest].cost))continue;
+      remaining.delete(closest);
+      settled.push(source+' settles '+closest);
+      if(host(closest)&&closest!==source)continue;
+      for(const [dest,cost] of neighbors(closest)){
+        const total=row[closest].cost+cost;
+        if(total<row[dest].cost)row[dest]={cost:total,next:source===closest?dest:row[closest].next};
+      }
+    }
+    if(!settled.length)return;
+    step++;
+    const done=nodes.every(n=>[...pending[n]].every(d=>!Number.isFinite(tables[n][d].cost)));
+    yield {tables,step,done,pending,detail:settled.join(' · ')};
+    if(done)return;
+  }
+}
+function* distanceVectorSteps(previousTables){
+  const nodes=all();
+  const limit=1+links.reduce((sum,{cost})=>sum+cost,0);
+  const local=initialTables(nodes);
+  let tables=previousTables??local;
+  yield {tables,step:0,detail:previousTables?
+    'Estimates before the edit. Click Next to exchange them over the current links. Cost limit: '+limit+'.':
+    'Initialization. Each node knows its own cost of zero.'};
+  for(let step=1;;step++){
+    const fresh={};
+    let changed=false;
+    for(const source of nodes){
+      const row=fresh[source]={...local[source]};
+      for(const [neighbor,cost] of neighbors(source)){
+        for(const dest of nodes){
+          if(host(neighbor)&&neighbor!==dest)continue;
+          const total=cost+tables[neighbor][dest].cost;
+          if(total<limit&&total<row[dest].cost)row[dest]={cost:total,next:neighbor};
+        }
+      }
+      for(const dest of nodes){
+        const before=tables[source][dest], after=row[dest];
+        if(before.cost!==after.cost||before.next!==after.next)changed=true;
+      }
+    }
+    tables=fresh;
+    yield {tables,step,done:!changed,detail:changed?
+      'Each node recomputed its routes from its neighbors’ previous estimates. Cost limit: '+limit+'.':
+      'Costs and next hops have stabilized.'};
+    if(!changed)return;
+  }
+}
+function solve(algorithm,source,dest){
+  let final;
+  for(const snapshot of algorithm())final=snapshot;
+  return routeResult(final.tables,final.step,source,dest);
+}
+function routeResult(tables,step,source,dest){
+  const next=Object.fromEntries(all().map(n=>[n,tables[n][dest].next]));
+  return {next,cost:tables[source][dest].cost,work:step};
+}
+function showStep(prefix=''){
+  const {tables,step,done,pending,detail}=steps.next().value;
+  displayedTables=tables;
+  completedStep=done?step:null;
+  by('run').disabled=!done;
+  const ls=by('algorithm').value==='ls';
+  by('stepStatus').textContent=prefix+(ls?'Dijkstra step ':'Distance-vector round ')+step+
+    (done?' · Complete. ':'. ')+detail;
+  by('nextStep').disabled=Boolean(done);
+  by('stepTables').innerHTML='<div class="routing-tables">'+all().map(source=>{
+    const rows=all().map(dest=>{
+      const {cost,next}=tables[source][dest];
+      const state=pending?(pending[source].has(dest)?(Number.isFinite(cost)?'Tentative':'—'):'Settled'):'';
+      return '<tr><td>'+dest+'</td><td>'+(Number.isFinite(cost)?cost:'∞')+'</td><td>'+
+        (next??(source===dest?'Local':'—'))+'</td>'+(ls?'<td>'+state+'</td>':'')+'</tr>';
+    }).join('');
+    return '<div class="scroll"><table><caption>'+source+' · '+ip(source)+'</caption><thead><tr>'+
+      '<th>Destination</th><th>Cost</th><th>Next hop</th>'+(ls?'<th>Status</th>':'')+
+      '</tr></thead><tbody>'+rows+'</tbody></table></div>';
+  }).join('')+'</div>';
+}
+function selectedSteps(){
+  return (by('algorithm').value==='ls'?linkStateSteps:distanceVectorSteps)();
+}
+by('startSteps').onclick=()=>{
+  clearTrace();
+  steps=selectedSteps();
+  showStep();
+};
+by('nextStep').onclick=()=>showStep();
+function route(source,dest,result){
+  if(!Number.isFinite(result.cost))return [];
+  const path=[source];
+  while(path.at(-1)!==dest)path.push(result.next[path.at(-1)]);
+  return path;
+}
+function checksum(bytes){
+  let sum=0;
+  for(let i=0;i<bytes.length;i+=2)sum+=(bytes[i]<<8)+(bytes[i+1]||0);
+  while(sum>>>16)sum=(sum&65535)+(sum>>>16);
+  return (~sum)&65535;
+}
+function icmp(type,sequence,payload,code=0){
+  const bytes=new Uint8Array(8+payload.length),v=new DataView(bytes.buffer);
+  bytes[0]=type;bytes[1]=code;
+  if(type===8||type===0){v.setUint16(4,0x2470);v.setUint16(6,sequence);}
+  bytes.set(payload,8);v.setUint16(2,checksum(bytes));return bytes;
+}
+function ipv4(source,dest,ttl,payload,id){
+  const bytes=new Uint8Array(20+payload.length),v=new DataView(bytes.buffer);
+  bytes[0]=0x45;v.setUint16(2,bytes.length);v.setUint16(4,id);bytes[8]=ttl;bytes[9]=1;
+  bytes.set(ip(source).split('.').map(Number),12);bytes.set(ip(dest).split('.').map(Number),16);
+  v.setUint16(10,checksum(bytes.slice(0,20)));bytes.set(payload,20);return bytes;
+}
+function simulateTrace(path,source,dest,maxHops,timeoutMs){
+  const records=[], lines=[], data=new TextEncoder().encode('CS2470 simulated probe');
+  const firstRouter=neighbors(source).find(([node])=>!host(node))?.[0];
+  let elapsed=0, sequence=0, reached=false, unreachable=false;
+  for(let ttl=1;ttl<=maxHops&&!reached&&!unreachable;ttl++){
+    const hop=path.length?path[ttl]:firstRouter;
+    const delay=20;
+    const answered=Boolean(hop)&&delay<=timeoutMs;
+    reached=answered&&hop===dest;
+    unreachable=answered&&!path.length&&ttl>1;
+    const replyType=reached?0:unreachable?3:11;
+    const label=reached?'Echo Reply':unreachable?'Destination Unreachable (Network Unreachable)':'Time Exceeded';
+    for(let attempt=0;attempt<3;attempt++){
+      sequence++;
+      const echo=icmp(8,sequence,data);
+      const probe=ipv4(source,dest,ttl,echo,sequence);
+      records.push({packet:probe,timeMs:elapsed});
+      if(answered){
+        const quoted=probe.slice(0,28);
+        const reply=icmp(replyType,sequence,reached?data:quoted);
+        records.push({packet:ipv4(hop,source,64,reply,1000+sequence),timeMs:elapsed+delay});
+      }
+      elapsed+=answered?delay+1:timeoutMs;
+    }
+    const result=answered?ip(hop)+'   '+hop+'   '+label:'*  *  *  Request timed out';
+    lines.push(String(ttl).padStart(3)+'  '+result);
+  }
+  return {records,lines,reached,unreachable};
+}
+function pcap(records){
+  const bytes=new Uint8Array(24+records.reduce((n,p)=>n+16+p.packet.length,0));
+  const view=new DataView(bytes.buffer);
+  view.setUint32(0,0xa1b2c3d4,true);view.setUint16(4,2,true);view.setUint16(6,4,true);
+  view.setUint32(16,65535,true);view.setUint32(20,101,true);
+  const seconds=Math.floor(Date.now()/1000);
+  let offset=24;
+  records.forEach(({packet,timeMs})=>{
+    view.setUint32(offset,seconds+Math.floor(timeMs/1000),true);
+    view.setUint32(offset+4,Math.round(timeMs*1000)%1000000,true);
+    view.setUint32(offset+8,packet.length,true);view.setUint32(offset+12,packet.length,true);
+    bytes.set(packet,offset+16);offset+=16+packet.length;
+  });
+  return bytes;
+}
+by('run').onclick=()=>{
+  if(completedStep===null)return;
+  if(!by('maxHops').reportValidity()||!by('timeout').reportValidity())return;
+  const maxHops=by('maxHops').valueAsNumber;
+  const timeoutMs=by('timeout').valueAsNumber*1000;
+  const a=by('source').value,b=by('destination').value;
+  if(a===b){clearTrace();by('results').textContent='Select two different hosts.';return;}
+  const useLs=by('algorithm').value==='ls';
+  const selected=routeResult(displayedTables,completedStep,a,b);
+  const ls=useLs?selected:solve(linkStateSteps,a,b);
+  const dv=useLs?solve(distanceVectorSteps,a,b):selected;
+  const lp=route(a,b,ls),dp=route(a,b,dv);
+  selectedPath=useLs?lp:dp;
+  const pathText=p=>p.length?p.join(' → '):'Unreachable';
+  const costText=n=>Number.isFinite(n)?n:'—';
+  const trace=simulateTrace(selectedPath,a,b,maxHops,timeoutMs);
+  capture=pcap(trace.records);
+  by('download').disabled=false;draw();
+  const summary=trace.reached?'Destination reached.':trace.unreachable?'Stopped: the first router has no route to the destination.':'Stopped at the '+maxHops+'-hop limit.';
+  by('results').innerHTML='<pre>TTL  Reply IP / result\n'+trace.lines.join('\n')+'\n\n'+summary+'</pre>'+
+    '<div class="scroll"><table><thead><tr><th>Algorithm</th><th>Path</th><th>Cost</th><th>Work in this simulation</th></tr></thead><tbody>'+
+    '<tr><td>Link state</td><td>'+pathText(lp)+'</td><td>'+costText(ls.cost)+'</td><td>'+ls.work+' steps per node (up to one selection per step)</td></tr>'+
+    '<tr><td>Distance vector</td><td>'+pathText(dp)+'</td><td>'+costText(dv.cost)+'</td><td>'+dv.work+' rounds, including final check</td></tr></tbody></table></div>'+
+    '<p><small>Traceroute uses the selected algorithm’s completed tables from Step 2. The comparison algorithm starts from scratch with the same link costs. Equal-cost paths may differ. Dijkstra steps and distance-vector rounds measure different work.</small></p>';
+};
+by('download').onclick=()=>{
+  if(!capture)return;
+  const url=URL.createObjectURL(new Blob([capture],{type:'application/vnd.tcpdump.pcap'}));
+  const link=document.createElement('a');
+  link.href=url;link.download='cs2470-'+by('algorithm').value+'-'+by('source').value+'-'+by('destination').value+'.pcap';link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
+build();
+</script>
+</html>
